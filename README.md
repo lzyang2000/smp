@@ -30,7 +30,7 @@ points its `init_smp_state` event at the right one, so no setup is needed:
 | Checkpoint                       | Trained on            | Used by                          |
 | -------------------------------- | --------------------- | -------------------------------- |
 | `pretrained_loco.pt`             | walk / jog / run      | `Smp-Forward-G1`                 |
-| `pretrained_lafan_run.pt`        | LAFAN run subset      | `Smp-Steering-G1`, `Smp-Location-G1` |
+| `pretrained_lafan_run.pt`        | LAFAN run subset      | `Smp-Steering-G1`, `Smp-Location-G1`, `Smp-Dodgeball-G1` |
 | `pretrained_getup_f2s2.pt`       | get-up (fall→stand)   | `Smp-Getup-G1`                   |
 
 ## Setup
@@ -146,6 +146,7 @@ Four downstream tasks are registered with `mjlab.tasks.registry` (importing
 | `Smp-Steering-G1` | <img src="https://raw.githubusercontent.com/SUZ-tsinghua/smp/assets/steering.gif" width="200"/> | track a commanded velocity + facing direction |
 | `Smp-Location-G1` | <img src="https://raw.githubusercontent.com/SUZ-tsinghua/smp/assets/location.gif" width="200"/> | walk to a world-frame xy goal |
 | `Smp-Getup-G1`    | <img src="https://raw.githubusercontent.com/SUZ-tsinghua/smp/assets/getup.gif" width="200"/> | stand up from a fallen pose |
+| `Smp-Dodgeball-G1`| | dodge projectiles thrown at the character |
 
 ### Train / play
 
@@ -206,6 +207,19 @@ Per-task `taskᵢ` components (each weighted, summed, then gated by `r_smp`):
   periodically resampled world-frame goal (uses `ws=4`).
 - **Get-up** — `0.7·` upward head velocity `+ 0.3·` head-height tracking, each
   `exp(−s·max(target − ·, 0)²)`, from a fallen GSI start.
+- **Dodgeball** — `0.9·` distance from the nearest projectile `(1 − exp(−s·d_min))`
+  `+ 0.1·` horizontal stillness `exp(−s·‖v_xy‖²)` (uses `ws=4`). A sphere is
+  parked far away and, after a per-env random trigger delay (1–4 s), launched on
+  a ballistic arc aimed at a noisy lead-prediction of the torso. An episode ends
+  in failure when a projectile strikes the character, detected (as in MimicKit)
+  by the OR of two proximity-gated branches: **contact force** — the
+  projectile↔robot contact force (read from a dedicated `ContactSensor`) exceeds
+  `hit_force_threshold`; and **velocity change** — the projectile's speed
+  deviates from the gravity-only ballistic prediction by more than
+  `hit_delta_v_threshold` (it bounced off the body). The one simplification vs.
+  MimicKit: the contact sensor's `secondary` is scoped to the robot, so
+  projectile↔ground contacts are excluded by the sensor itself rather than by an
+  explicit proximity gate on the force read.
 
 ### Generative State Initialization (GSI)
 
