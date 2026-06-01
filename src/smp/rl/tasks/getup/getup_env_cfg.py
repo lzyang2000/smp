@@ -10,6 +10,7 @@ from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.termination_manager import TerminationTermCfg
 
 from smp.rl.env_cfg import g1_smp_env_cfg
+from smp.rl.payloads import wrap_spec_fn_with_payloads
 from smp.rl.rewards import task_smp_product
 from smp.rl.tasks.getup import mdp
 
@@ -31,7 +32,22 @@ def g1_getup_smp_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   cfg = g1_smp_env_cfg(play=play)
 
   # --- Scene ---------------------------------------------------------------
-  cfg.scene.entities["robot"].spec_fn = get_g1_spec_with_head
+  # Add the head site, then attach the sim-to-real payload (Jetson + Dex1-1
+  # grippers) so this getup teacher trains under the same mass/inertia the
+  # wbc_mjlab student deploys with. Payloads change dynamics only, so the
+  # frozen SMP prior + guidance reward stay valid. Disable via
+  # SMP_ATTACH_PAYLOADS=0.
+  cfg.scene.entities["robot"].spec_fn = wrap_spec_fn_with_payloads(
+    get_g1_spec_with_head
+  )
+
+  # --- Observations --------------------------------------------------------
+  # Drop base_lin_vel from the ACTOR (not reliably available on the physical
+  # G1); the critic keeps it as a privileged term. This makes the trained
+  # policy deployment-safe / contract-compatible with the wbc_mjlab teacher
+  # slot. Critic retains base_lin_vel (it was copied into the critic group at
+  # build time, a dict independent of the actor group's).
+  cfg.observations["actor"].terms.pop("base_lin_vel", None)
 
   # --- Events --------------------------------------------------------------
   cfg.events["init_smp_state"].params["ckpt_path"] = (
