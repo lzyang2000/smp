@@ -59,7 +59,11 @@ echo "[1/5] gathered $n CSV(s) into $CSV_DIR"
 [ "$n" -gt 0 ] || { echo "ERROR: no CSVs matched '$CLIP_GLOB' in $LAFAN_G1_DIR"; exit 1; }
 
 # ---- 2. CSV -> windowed NPZ, with left/right mirror augmentation --------------
+# Clean NPZ_DIR first: the pretrain loads EVERY .npz in this dir, so stale files from a
+# previous run with a different CLIP_GLOB would leak in (e.g. dance/fight NPZs surviving a
+# switch to a locomotion-only glob, inflating the dataset back to the full set).
 echo "[2/5] csv_to_npz (--mirror): doubling clips with sagittal mirror"
+rm -rf "$NPZ_DIR"; mkdir -p "$NPZ_DIR"
 uv run scripts/csv_to_npz.py --input-dir "$CSV_DIR" --output-dir "$NPZ_DIR" --mirror
 
 # ---- 3. Normalization stats ---------------------------------------------------
