@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -111,6 +112,11 @@ def pretrain(cfg: PretrainCfg) -> Path:
     f"Dataset: {len(dataset)} windows, n_train={n_train}, n_val={n_val}, "
     f"feature_dim={feature_dim}, window_size={window_size}"
   )
+  print(
+    f"[INFO] device={cfg.device}, batch_size={cfg.batch_size}, "
+    f"train_batches/epoch={-(-n_train // cfg.batch_size)}, "
+    f"num_noise_samples={cfg.num_noise_samples} (effective fwd/batch={cfg.batch_size * cfg.num_noise_samples})"
+  )
 
   train_set, val_set = random_split(dataset, [n_train, n_val])
   # GPU-resident batching: the windows tensor is small in bytes (N*window*feat*4 ~= a couple GB even
@@ -157,6 +163,9 @@ def pretrain(cfg: PretrainCfg) -> Path:
     epoch_loss = torch.zeros((), device=device)
     n_batches = 0
 
+    if device.type == "cuda":
+      torch.cuda.synchronize()
+    t_ep = time.perf_counter()
     perm = train_idx[torch.randperm(train_idx.numel(), device=device)]
     for i in range(0, perm.numel(), cfg.batch_size):
       x_0 = windows_gpu[perm[i : i + cfg.batch_size]]
@@ -173,6 +182,9 @@ def pretrain(cfg: PretrainCfg) -> Path:
       epoch_loss += loss.detach()
       n_batches += 1
 
+    if device.type == "cuda":
+      torch.cuda.synchronize()
+    secs = time.perf_counter() - t_ep
     avg_loss = (epoch_loss / max(n_batches, 1)).item()
 
     if epoch % cfg.log_interval == 0:
@@ -180,7 +192,9 @@ def pretrain(cfg: PretrainCfg) -> Path:
       val_loss = _validate(
         eval_model, scheduler, windows_gpu, val_idx, cfg.batch_size, cfg.num_noise_samples
       )
-      print(f"Epoch {epoch:4d} | train={avg_loss:.6f} | val={val_loss:.6f}")
+      print(
+        f"Epoch {epoch:4d} | train={avg_loss:.6f} | val={val_loss:.6f} | {secs:.2f}s/epoch"
+      )
       if wandb_run is not None:
         wandb_run.log({"epoch": epoch, "train/loss": avg_loss, "val/loss": val_loss})
 
