@@ -14,12 +14,21 @@ PROJECTILE_BODY_NAME = "dodgeball"
 
 
 def get_projectile_cfg(
-  radius: float = 0.11,
-  mass: float = 0.5,
+  radius: float = 0.0762,
+  mass: float = 0.136,
   color: tuple[float, float, float, float] = (0.9725, 0.42, 0.1137, 1.0),
-  spawn_pos: tuple[float, float, float] = (10.0, 10.0, 0.11),
+  spawn_pos: tuple[float, float, float] = (10.0, 10.0, 0.0762),
 ) -> EntityCfg:
-  """A free-floating sphere projectile (matches MimicKit's ``dodgeball``)."""
+  """A free-floating sphere projectile.
+
+  Matched to OUR (AMP-task) ball (``src/assets/objects/ball.py``) so the two tasks
+  throw the identical object: a 6-inch-diameter foam dodgeball -> default radius
+  0.0762 m, fixed mass 0.136 kg. The geom is named ``ball_collision`` so a per-episode
+  size-randomization event (``dr.geom_size`` on this geom) can write the radius
+  absolutely, exactly as OUR task does. Mass stays fixed (the launch writes velocity
+  directly, mass-independent; hit detection is geometric), so only the radius matters
+  for the dodge dynamics.
+  """
 
   def spec_fn() -> mujoco.MjSpec:
     spec = mujoco.MjSpec()
@@ -31,6 +40,7 @@ def get_projectile_cfg(
     geom.rgba[:] = color
     geom.mass = mass
     geom.condim = 3
+    geom.name = "ball_collision"
     return spec
 
   return EntityCfg(

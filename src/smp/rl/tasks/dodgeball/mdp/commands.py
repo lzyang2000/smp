@@ -149,28 +149,48 @@ class DodgeballCommand(CommandTerm):
     target_pos += self.cfg.aim_noise_scale * torch.randn_like(target_pos)
     target_vel = self.robot.data.body_link_lin_vel_w[env_ids, self.target_body_id]
 
-    speed = torch.empty(n, device=self.device).uniform_(
-      self.cfg.proj_speed_min, self.cfg.proj_speed_max
-    )
-    rand_h = torch.empty(n, device=self.device).uniform_(
-      self.cfg.proj_h_min, self.cfg.proj_h_max
-    )
-    rand_dist = torch.empty(n, device=self.device).uniform_(
-      self.cfg.proj_dist_min, self.cfg.proj_dist_max
-    )
+    c = self.cfg
+
+    def _u(lo: float, hi: float) -> torch.Tensor:
+      return torch.empty(n, device=self.device).uniform_(lo, hi)
+
+    speed = _u(c.proj_speed_min, c.proj_speed_max)
+    rand_dist = _u(c.proj_dist_min, c.proj_dist_max)
     travel = rand_dist / speed
 
-    # Vertical launch component so the arc passes through rand_h at impact.
-    vel_z = (target_pos[:, 2] - rand_h) / travel - 0.5 * g * travel
+    # BIMODAL threat (matches OUR throw_ball_on_dwell high_throw_fraction): each ball is a
+    # DUCK ball (launched low, arcs UP to torso/head) or a DESCENDING ball (launched high,
+    # arrives at the lower body). Both solve vz to their impact target so neither lands short.
+    high = torch.rand(n, device=self.device) < c.high_throw_fraction
+    launch_h = torch.where(
+      high, _u(c.high_launch_h_min, c.high_launch_h_max),
+      _u(c.descend_launch_h_min, c.descend_launch_h_max),
+    )
+    z_target = torch.where(
+      high, _u(c.high_target_z_min, c.high_target_z_max),
+      _u(c.low_target_z_min, c.low_target_z_max),
+    )
+    # Vertical launch component so the arc passes through z_target at impact (g is negative).
+    vel_z = (z_target - launch_h) / travel - 0.5 * g * travel
 
     # Lead the target by its current velocity over the travel time.
     target_pred = target_pos + target_vel * travel.unsqueeze(-1)
 
-    theta = torch.empty(n, device=self.device).uniform_(0.0, 2.0 * math.pi)
+    # FRONT cone (matches OUR throw): launch from within +/- angle_deg of the robot's HEADING and
+    # AHEAD of it, so the ball comes at the front (camera-relevant). theta is the azimuth from the
+    # target to the launch point; setting it along the heading puts the launch point in front of the
+    # robot and the velocity points back toward it. (SMP's default was a full 360-deg azimuth.)
+    q = self.robot.data.root_link_quat_w[env_ids]  # (n, 4) wxyz
+    yaw = torch.atan2(
+      2.0 * (q[:, 0] * q[:, 3] + q[:, 1] * q[:, 2]),
+      1.0 - 2.0 * (q[:, 2] ** 2 + q[:, 3] ** 2),
+    )
+    half = math.radians(c.angle_deg)
+    theta = yaw + torch.empty(n, device=self.device).uniform_(-half, half)
     proj_pos = torch.zeros(n, 3, device=self.device)
     proj_pos[:, 0] = target_pred[:, 0] + rand_dist * torch.cos(theta)
     proj_pos[:, 1] = target_pred[:, 1] + rand_dist * torch.sin(theta)
-    proj_pos[:, 2] = rand_h
+    proj_pos[:, 2] = launch_h
 
     proj_delta = target_pred - proj_pos
     proj_delta[:, 2] = 0.0
@@ -204,24 +224,57 @@ class DodgeballCommandCfg(CommandTermCfg):
   projectile_names: tuple[str, ...] = ("projectile",)
   target_body: str = "torso_link"
 
-  proj_radius: float = 0.11
-  proj_dist_min: float = 8.0
-  proj_dist_max: float = 10.0
-  proj_h_min: float = 0.5
-  proj_h_max: float = 2.5
-  proj_speed_min: float = 12.0
-  proj_speed_max: float = 15.0
+  # --- Launch distribution: matched to OUR (AMP-task) SLOW, BIMODAL throws. --
+  # OUR ``throw_ball_on_dwell`` (src/tasks/amp_loco/mdp/events.py) launches a ball
+  # 2-3 m ahead that reaches the robot in ~0.58-0.63 s (a horizontal speed of only
+  # ~dist/flight ~= 3.3-5.2 m/s) -- far slower / closer than the MimicKit default
+  # (8-10 m at 12-15 m/s). Here travel = dist/speed, so to land in ~0.55-0.65 s from
+  # 2-3 m we need speed ~= 3.5-5.0 m/s.
+  #
+  # BIMODAL (reproduces OUR 50/50 ``high_throw_fraction`` mix): each ball is either
+  #   * a DUCK ball (frac = high_throw_fraction): launched LOW (~waist) and arcing UP to
+  #     arrive at torso/head height -> the robot must duck under it; or
+  #   * a DESCENDING ball (the rest): launched HIGH (~2 m) and arriving at the LOWER body
+  #     on the way down -> the robot sidesteps / lifts a leg over it.
+  # We keep SMP's "solve vz to a target impact height" mechanism (robust: never lands
+  # short on the fixed speed-based travel) but make BOTH the launch height and the impact
+  # target height bimodal -- so the duck-vs-sidestep outcome matches OUR throw. (OUR
+  # descending mode uses pure vz0=0; solving to a low target gives a near-identical
+  # descending arrival without the land-short risk of a fixed-speed travel.)
+  #
+  # Launch AZIMUTH is a +/- ``angle_deg`` FRONT cone of the robot's heading (matches OUR throw,
+  # which spawns the ball in the frontal cone -- camera-relevant), NOT the SMP/MimicKit 360-deg
+  # default. Radius matches OUR foam dodgeball (0.0762 m); per-episode size DR (0.075-0.125 m) is
+  # added by the env cfg. ``aim_noise_scale`` 0.1 + lead-the-target both match OUR throw.
+  proj_radius: float = 0.0762
+  proj_dist_min: float = 2.0
+  proj_dist_max: float = 3.0
+  proj_speed_min: float = 3.5
+  proj_speed_max: float = 5.0
   trigger_time_min: float = 1.0
   trigger_time_max: float = 4.0
   aim_noise_scale: float = 0.1
+  angle_deg: float = 25.0  # +/- heading half-cone for the launch azimuth (matches OUR throw)
+  # Bimodal vertical profile (matches OUR throw_ball_on_dwell).
+  high_throw_fraction: float = 0.5
+  high_launch_h_min: float = 0.4   # DUCK ball launch height (~waist)
+  high_launch_h_max: float = 0.9
+  high_target_z_min: float = 1.0   # DUCK ball impact height (torso/head)
+  high_target_z_max: float = 1.5
+  descend_launch_h_min: float = 1.5  # DESCENDING ball launch height (~2 m)
+  descend_launch_h_max: float = 2.3
+  low_target_z_min: float = 0.2    # DESCENDING ball impact height (lower body)
+  low_target_z_max: float = 0.9
 
   def __post_init__(self) -> None:
-    self.proj_h_min = max(self.proj_h_min, self.proj_radius)
     for lo, hi, name in (
       (self.proj_dist_min, self.proj_dist_max, "proj_dist"),
-      (self.proj_h_min, self.proj_h_max, "proj_h"),
       (self.proj_speed_min, self.proj_speed_max, "proj_speed"),
       (self.trigger_time_min, self.trigger_time_max, "trigger_time"),
+      (self.high_launch_h_min, self.high_launch_h_max, "high_launch_h"),
+      (self.high_target_z_min, self.high_target_z_max, "high_target_z"),
+      (self.descend_launch_h_min, self.descend_launch_h_max, "descend_launch_h"),
+      (self.low_target_z_min, self.low_target_z_max, "low_target_z"),
     ):
       if hi < lo:
         msg = f"{name}_max ({hi}) must be >= {name}_min ({lo})."
