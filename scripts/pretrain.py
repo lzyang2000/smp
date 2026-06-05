@@ -10,7 +10,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 import tyro
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import random_split
 
 from smp.pretrain.dataset import MotionWindowDataset
 from smp.pretrain.model import DiffusionDenoiser
@@ -113,16 +113,13 @@ def pretrain(cfg: PretrainCfg) -> Path:
   )
 
   train_set, val_set = random_split(dataset, [n_train, n_val])
-  pin_memory = device.type == "cuda"
-  train_loader = DataLoader(
-    train_set,
-    batch_size=cfg.batch_size,
-    shuffle=True,
-    pin_memory=pin_memory,
-  )
-  val_loader = DataLoader(
-    val_set, batch_size=cfg.batch_size, shuffle=False, pin_memory=pin_memory
-  )
+  # GPU-resident batching: the windows tensor is small in bytes (N*window*feat*4 ~= a couple GB even
+  # at ~1M windows), so move it to the device ONCE and index batches directly. This removes the
+  # DataLoader's single-threaded (num_workers=0) per-sample collate + a CPU->GPU copy every batch,
+  # which on an H100 starved the GPU and made epochs minutes-long over the windowed LaFAN set.
+  windows_gpu = dataset.windows.to(device)
+  train_idx = torch.as_tensor(train_set.indices, device=device, dtype=torch.long)
+  val_idx = torch.as_tensor(val_set.indices, device=device, dtype=torch.long)
 
   model = DiffusionDenoiser(
     feature_dim=feature_dim,
@@ -160,8 +157,9 @@ def pretrain(cfg: PretrainCfg) -> Path:
     epoch_loss = torch.zeros((), device=device)
     n_batches = 0
 
-    for batch in train_loader:
-      x_0 = batch.to(device, non_blocking=pin_memory)
+    perm = train_idx[torch.randperm(train_idx.numel(), device=device)]
+    for i in range(0, perm.numel(), cfg.batch_size):
+      x_0 = windows_gpu[perm[i : i + cfg.batch_size]]
       loss = _diffusion_loss(model, scheduler, x_0, cfg.num_noise_samples)
 
       optimizer.zero_grad()
@@ -180,7 +178,7 @@ def pretrain(cfg: PretrainCfg) -> Path:
     if epoch % cfg.log_interval == 0:
       eval_model = ema.shadow if ema is not None else model
       val_loss = _validate(
-        eval_model, scheduler, val_loader, device, pin_memory, cfg.num_noise_samples
+        eval_model, scheduler, windows_gpu, val_idx, cfg.batch_size, cfg.num_noise_samples
       )
       print(f"Epoch {epoch:4d} | train={avg_loss:.6f} | val={val_loss:.6f}")
       if wandb_run is not None:
@@ -211,16 +209,16 @@ def pretrain(cfg: PretrainCfg) -> Path:
 def _validate(
   model: torch.nn.Module | DiffusionDenoiser,
   scheduler: DDPMScheduler,
-  val_loader: DataLoader[torch.Tensor],
-  device: torch.device,
-  pin_memory: bool,
+  windows_gpu: torch.Tensor,
+  val_idx: torch.Tensor,
+  batch_size: int,
   num_noise_samples: int,
 ) -> float:
   model.eval()
-  total = torch.zeros((), device=device)
+  total = torch.zeros((), device=windows_gpu.device)
   n = 0
-  for batch in val_loader:
-    x_0 = batch.to(device, non_blocking=pin_memory)
+  for i in range(0, val_idx.numel(), batch_size):
+    x_0 = windows_gpu[val_idx[i : i + batch_size]]
     total += _diffusion_loss(model, scheduler, x_0, num_noise_samples)
     n += 1
   return (total / max(n, 1)).item()
