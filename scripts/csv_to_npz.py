@@ -90,6 +90,70 @@ EE_BODY_NAMES: tuple[str, ...] = (
 NUM_EE = len(EE_BODY_NAMES)
 
 
+def _mirror_partner(name: str) -> str:
+  """Left<->right counterpart of a joint/body name (unchanged if central)."""
+  if name.startswith("left_"):
+    return "right_" + name[len("left_") :]
+  if name.startswith("right_"):
+    return "left_" + name[len("right_") :]
+  return name
+
+
+def _build_mirror_maps() -> tuple[list[int], list[float], list[int]]:
+  """Index/sign maps for a sagittal (negate-y) mirror.
+
+  Joints: permute each DoF to its left<->right partner, then flip the sign of
+  roll/yaw DoFs (pitch/knee/elbow are unchanged under a left-right mirror).
+  End-effectors: permute each body to its left<->right partner.
+  """
+  jname_to_idx = {n: i for i, n in enumerate(JOINT_NAMES)}
+  joint_perm = [jname_to_idx[_mirror_partner(n)] for n in JOINT_NAMES]
+  joint_sign = [-1.0 if ("roll" in n or "yaw" in n) else 1.0 for n in JOINT_NAMES]
+  ename_to_idx = {n: i for i, n in enumerate(EE_BODY_NAMES)}
+  ee_perm = [ename_to_idx[_mirror_partner(n)] for n in EE_BODY_NAMES]
+  return joint_perm, joint_sign, ee_perm
+
+
+def _mirror_motion(
+  base_pos: torch.Tensor,
+  base_quat: torch.Tensor,
+  base_lin_vel: torch.Tensor,
+  base_ang_vel: torch.Tensor,
+  ee_pos: torch.Tensor,
+  joint_pos: torch.Tensor,
+  joint_perm: torch.Tensor,
+  joint_sign: torch.Tensor,
+  ee_perm: torch.Tensor,
+) -> tuple[
+  torch.Tensor,  # base_pos
+  torch.Tensor,  # base_quat
+  torch.Tensor,  # base_lin_vel
+  torch.Tensor,  # base_ang_vel
+  torch.Tensor,  # ee_pos
+  torch.Tensor,  # joint_pos
+]:
+  """Reflect a raw FK motion across the sagittal (x-z) plane (negate y).
+
+  Applied to world-frame raw motion *before* windowing, so the heading-anchor
+  math in ``_compute_windows`` is reused unchanged. The map is an involution
+  (mirroring twice returns the input). Quaternions are wxyz.
+  """
+  mbp = base_pos.clone()
+  mbp[:, 1] = -mbp[:, 1]
+  mbq = base_quat.clone()  # wxyz: reflection negates the x and z components
+  mbq[:, 1] = -mbq[:, 1]
+  mbq[:, 3] = -mbq[:, 3]
+  mlv = base_lin_vel.clone()  # polar vector: negate y
+  mlv[:, 1] = -mlv[:, 1]
+  mav = base_ang_vel.clone()  # pseudovector: negate x and z
+  mav[:, 0] = -mav[:, 0]
+  mav[:, 2] = -mav[:, 2]
+  mee = ee_pos[:, ee_perm, :].clone()  # swap left/right bodies, negate y
+  mee[:, :, 1] = -mee[:, :, 1]
+  mjp = joint_pos[:, joint_perm] * joint_sign  # swap DoFs, flip roll/yaw signs
+  return mbp, mbq, mlv, mav, mee, mjp
+
+
 @dataclass
 class Cfg:
   input_dir: str = "datasets/csv"
@@ -106,6 +170,9 @@ class Cfg:
   """Output (and sim) frame rate after interpolation."""
   device: str = ""
   """Compute device. Empty = auto (cuda if available else cpu)."""
+  mirror: bool = False
+  """Also emit a left-right mirrored ``<stem>_mirror.npz`` per clip (doubles
+  the data and balances left/right, matching MimicKit's mirrored locomotion)."""
   shard_index: int = 0
   """Index of this shard (for parallel runs). Files are sliced as [shard_index::num_shards]."""
   num_shards: int = 1
@@ -289,6 +356,20 @@ def _compute_windows(
   )
 
 
+def _save_windows(out_path: Path, windows: torch.Tensor, cfg: Cfg) -> None:
+  feature_dims = [3, 6, NUM_JOINTS, NUM_EE * 3, 3, 3]
+  np.savez_compressed(
+    out_path,
+    windows=windows.cpu().numpy().astype(np.float32),
+    fps=np.array([cfg.output_fps], dtype=np.float32),
+    window_size=np.array([cfg.window_size], dtype=np.int32),
+    stride=np.array([cfg.stride], dtype=np.int32),
+    ee_body_names=np.array(EE_BODY_NAMES),
+    feature_dims=np.array(feature_dims, dtype=np.int32),
+  )
+  print(f"  saved {out_path.name}: windows={tuple(windows.shape)}")
+
+
 def main(cfg: Cfg) -> None:
   if not cfg.device:
     cfg.device = detect_device()
@@ -318,6 +399,11 @@ def main(cfg: Cfg) -> None:
     dtype=torch.long,
     device=sim.device,
   )
+
+  joint_perm_l, joint_sign_l, ee_perm_l = _build_mirror_maps()
+  joint_perm = torch.tensor(joint_perm_l, dtype=torch.long, device=sim.device)
+  joint_sign = torch.tensor(joint_sign_l, dtype=torch.float, device=sim.device)
+  ee_perm = torch.tensor(ee_perm_l, dtype=torch.long, device=sim.device)
 
   feature_dims = [3, 6, NUM_JOINTS, NUM_EE * 3, 3, 3]
   total_feature_dim = sum(feature_dims)
@@ -370,18 +456,26 @@ def main(cfg: Cfg) -> None:
     if windows is None:
       print(f"  [SKIP] too short for window_size={cfg.window_size}")
       continue
+    _save_windows(out_dir / f"{csv_path.stem}.npz", windows, cfg)
 
-    out_path = out_dir / f"{csv_path.stem}.npz"
-    np.savez_compressed(
-      out_path,
-      windows=windows.cpu().numpy().astype(np.float32),
-      fps=np.array([cfg.output_fps], dtype=np.float32),
-      window_size=np.array([cfg.window_size], dtype=np.int32),
-      stride=np.array([cfg.stride], dtype=np.int32),
-      ee_body_names=np.array(EE_BODY_NAMES),
-      feature_dims=np.array(feature_dims, dtype=np.int32),
-    )
-    print(f"  saved {out_path.name}: windows={tuple(windows.shape)}")
+    if cfg.mirror:
+      m_windows = _compute_windows(
+        *_mirror_motion(
+          base_pos,
+          base_quat,
+          base_lin_vel,
+          base_ang_vel,
+          ee_pos,
+          joint_pos,
+          joint_perm,
+          joint_sign,
+          ee_perm,
+        ),
+        cfg.window_size,
+        cfg.stride,
+      )
+      if m_windows is not None:
+        _save_windows(out_dir / f"{csv_path.stem}_mirror.npz", m_windows, cfg)
 
 
 if __name__ == "__main__":
