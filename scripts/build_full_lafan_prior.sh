@@ -27,6 +27,7 @@ LAFAN_G1_DIR="${LAFAN_G1_DIR:-$HOME/LAFAN1_Retargeting_Dataset/g1}"
 CLIP_GLOB="${CLIP_GLOB:-*.csv}"
 PRIOR_NAME="${PRIOR_NAME:-full_lafan_prior}"
 NUM_EPOCHS="${NUM_EPOCHS:-2000}"   # diffusion pretraining epochs
+BATCH_SIZE="${BATCH_SIZE:-1024}"   # pretrain batch (bump big on an H100 -- the windows live on GPU)
 NUM_ENVS="${NUM_ENVS:-4096}"       # RL parallel envs
 USE_WANDB="${USE_WANDB:-false}"    # log pretraining to W&B
 RUN_RL="${RUN_RL:-true}"           # train the dodgeball policy at the end (RUN_RL=false = build prior only)
@@ -78,6 +79,7 @@ uv run scripts/pretrain.py \
   --norm-stats-file "$NORM_STATS" \
   --name "$PRIOR_NAME" \
   --num-epochs "$NUM_EPOCHS" \
+  --batch-size "$BATCH_SIZE" \
   --use-ema \
   $WANDB_FLAG
 
