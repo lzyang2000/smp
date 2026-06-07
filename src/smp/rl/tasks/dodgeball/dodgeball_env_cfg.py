@@ -11,7 +11,8 @@ from __future__ import annotations
 import math
 
 from mjlab.envs import ManagerBasedRlEnvCfg
-from mjlab.envs.mdp import bad_orientation, dr
+from mjlab.envs.mdp import action_rate_l2, bad_orientation, dr, joint_acc_l2, joint_pos_limits
+from mjlab.tasks.tracking.mdp import self_collision_cost
 from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -68,11 +69,36 @@ def g1_dodgeball_smp_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       "ws": 4,
     },
   )
-  # NOTE: no dodge_link_cbf and no hand-designed regularizers here -- that is intentional and
-  # FAITHFUL TO SMP: the reward is purely the SMP-gated task (dodge x r_smp), with the diffusion
-  # prior (not hand-tuned penalties) providing naturalness/stability. The trained AMP state oracle
-  # (g1_amp_dodge_mimickit, the 27% checkpoint) predates dodge_link_cbf and also did not use it, so
-  # dropping it here both matches that checkpoint and keeps the SMP method clean.
+  # --- Regularizers + terminal penalty (ported from OUR AMP dodge task) ----
+  # ADDED as separate additive RewardTermCfgs (NOT inside task_smp_product): we keep the
+  # prior-vs-discriminator difference as the *only* naturalness-mechanism difference, but
+  # otherwise match OUR AMP task's hand-tuned shaping so the two reward stacks line up.
+  # Weights are copied verbatim from g1_amp_dodge_mimickit (both envs use scale_rewards_by_dt
+  # at the same 50 Hz step, so the per-second weights transfer directly).
+  #   - is_terminated -200, EXCLUDING projectile_hit (a hit ends the episode with no penalty
+  #     spike; only genuine falls are penalized -- see is_terminated_except).
+  #   - joint_acc / joint_pos_limits / action_rate: standard smoothness/limit regularizers.
+  #   - self_collisions: reuses the base env's `self_collision` sensor (found-based; the cost
+  #     fn falls back to `found` when the sensor has no force history).
+  # NOTE: OUR AMP task also has `foot_slip` (-0.25), but it is gated on the locomotion command
+  # (penalize sliding only while *commanded to move*). SMP is stand-in-place (no twist command),
+  # so the gate is never active; an UNGATED foot-slip penalty would instead punish the sidestep
+  # that IS SMP's dodge. So foot_slip is intentionally omitted here. `dodge_link_cbf` is likewise
+  # omitted -- it is dodge *shaping*, not a regularizer, and keeping it out preserves the clean
+  # prior-only-vs-discriminator-only comparison.
+  cfg.rewards["is_terminated"] = RewardTermCfg(
+    func=mdp.is_terminated_except,
+    weight=-200.0,
+    params={"exclude_terms": ("projectile_hit",)},
+  )
+  cfg.rewards["joint_acc_l2"] = RewardTermCfg(func=joint_acc_l2, weight=-2.5e-7)
+  cfg.rewards["joint_pos_limits"] = RewardTermCfg(func=joint_pos_limits, weight=-10.0)
+  cfg.rewards["action_rate_l2"] = RewardTermCfg(func=action_rate_l2, weight=-0.01)
+  cfg.rewards["self_collisions"] = RewardTermCfg(
+    func=self_collision_cost,
+    weight=-0.1,
+    params={"sensor_name": "self_collision", "force_threshold": 10.0},
+  )
 
   # --- Events --------------------------------------------------------------
   cfg.events["init_smp_state"].params["ckpt_path"] = (
@@ -101,6 +127,13 @@ def g1_dodgeball_smp_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   )
 
   # --- Terminations --------------------------------------------------------
+  # Drop the base env's self-collision termination (pelvis-subtree self-contact).
+  # It was ending ~18% of dodgeball episodes -- the robot tearing itself apart
+  # rather than failing to dodge -- which both confounds the hit-rate comparison
+  # against OUR AMP state oracle (where self-collision is only a reward penalty,
+  # never a termination) and wastes episodes on a failure mode orthogonal to the
+  # dodge task. Same treatment getup already applies (getup_env_cfg.py).
+  cfg.terminations.pop("self_collision", None)
   # Matched to OUR (AMP-task) dodge terminations: a raised base-height floor (0.45 m,
   # vs SMP's old 0.3), a bad-orientation cut (torso tilted > 80 deg), and the
   # sustained "collapsed crouch" (< 0.55 m held > 0.3 s) -- so the SMP robot must

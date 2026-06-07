@@ -51,6 +51,27 @@ def dodge(
   return pos_w * pos_reward + vel_w * vel_reward
 
 
+def is_terminated_except(
+  env: "ManagerBasedRlEnv",
+  exclude_terms: tuple[str, ...] = (),
+) -> torch.Tensor:
+  """``is_terminated`` (penalize non-timeout terminations) but EXCLUDING some terms.
+
+  Verbatim port of OUR (AMP-task) ``is_terminated_except``. The projectile hit must end the
+  episode WITHOUT a reward spike -- matching the SMP/MimicKit setup (a hit's cost is the lost
+  future reward, not a large negative penalty); penalizing every (initially unavoidable) hit
+  would flood the gradient and trade away the dodge behavior. So the ``-200`` terminal penalty
+  is kept for genuine falls (``base_too_low``/``bad_orientation``/``collapsed_crouch``) but
+  excluded for ``projectile_hit``.
+  """
+  tm = env.termination_manager
+  terminated = tm.terminated.clone()
+  for name in exclude_terms:
+    if name in tm.active_terms:
+      terminated = terminated & ~tm.get_term(name)
+  return terminated.float()
+
+
 def dodge_link_cbf_reward(
   env: "ManagerBasedRlEnv",
   robot_name: str = "robot",
