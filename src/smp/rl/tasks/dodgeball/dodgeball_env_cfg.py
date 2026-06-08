@@ -102,11 +102,10 @@ def g1_dodgeball_smp_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 
   # --- Events --------------------------------------------------------------
   cfg.events["init_smp_state"].params["ckpt_path"] = (
-    # Balanced, mirrored full-LAFAN locomotion prior (built by
-    # scripts/build_full_lafan_prior.sh). Replaces the forward-run-only
-    # pretrained_lafan_run.pt so the policy steps in place / sidesteps to
-    # dodge instead of running away.
-    "datasets/pretrain_ckpt/full_lafan_prior.pt"
+    # Mixed-dodge prior trained on datasets/npz/mixed_dodge with
+    # norm_stats_ours.npz (scripts/pretrain.py --name mixed_dodge). Copy the
+    # final logs/pretrain/mixed_dodge/<ts>/pretrained.pt here to update it.
+    "datasets/pretrain_ckpt/mixed_dodge_prior.pt"
   )
   # Per-episode projectile SIZE randomization, matched to OUR (AMP-task)
   # ``randomize_ball_size``: write the sphere radius absolutely to a uniform
